@@ -317,6 +317,16 @@ export default function TaskBoard({
           <SyncIndicator state={sync} onRetry={runSync} />
         </div>
         <div className="mt-3 flex flex-wrap gap-2">
+          {googleConnected && (
+            <button
+              onClick={runSync}
+              disabled={sync === "syncing"}
+              title="Rebuild the calendar now (e.g. after you changed a Google Calendar event)"
+              className="whitespace-nowrap rounded-lg border border-neutral-200 bg-white px-3 py-1.5 text-sm text-neutral-700 enabled:hover:bg-neutral-50 disabled:opacity-40"
+            >
+              ⟳ Sync now
+            </button>
+          )}
           <button
             onClick={doUndo}
             disabled={!undoLabel}
