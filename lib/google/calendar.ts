@@ -62,6 +62,58 @@ export async function getBusy(
   return out;
 }
 
+export interface BusyAndOwned {
+  busy: Interval[];
+  ownedIds: string[];
+}
+
+/**
+ * One pass over all calendars: returns real busy intervals (excluding OUR events,
+ * free/transparent, cancelled, and declined) plus the ids of every event we own
+ * (so we can delete them). Excluding ours by marker means leftover duplicates from
+ * a previously-failed sync never count as busy — so they can't create gaps.
+ * (Timed events only; all-day events are treated as free.)
+ */
+export async function getBusyAndOwned(
+  cal: Calendar,
+  calendarIds: string[],
+  timeMin: string,
+  timeMax: string,
+): Promise<BusyAndOwned> {
+  const busy: Interval[] = [];
+  const ownedIds: string[] = [];
+  for (const calendarId of calendarIds) {
+    let pageToken: string | undefined;
+    do {
+      const res = await withRetry(() =>
+        cal.events.list({
+          calendarId,
+          timeMin,
+          timeMax,
+          singleEvents: true,
+          showDeleted: false,
+          maxResults: 2500,
+          pageToken,
+        }),
+      );
+      for (const e of res.data.items ?? []) {
+        if (e.status === "cancelled") continue;
+        if (e.extendedProperties?.private?.[OWNED_KEY] === OWNED_VAL) {
+          if (e.id) ownedIds.push(e.id); // ours: exclude from busy, queue for deletion
+          continue;
+        }
+        if (e.transparency === "transparent") continue; // marked "free"
+        if ((e.attendees ?? []).some((a) => a.self && a.responseStatus === "declined")) continue;
+        const start = e.start?.dateTime;
+        const end = e.end?.dateTime;
+        if (start && end) busy.push({ start, end });
+      }
+      pageToken = res.data.nextPageToken ?? undefined;
+    } while (pageToken);
+  }
+  return { busy, ownedIds };
+}
+
 /** Event ids we previously created in a calendar (found via our marker). */
 export async function listOwnedEventIds(
   cal: Calendar,

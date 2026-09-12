@@ -9,8 +9,7 @@ import type { SchedulerSettings, Task as SchedTask } from "@/lib/scheduler/types
 import {
   calendarFor,
   listCalendarIds,
-  getBusy,
-  listOwnedEventIds,
+  getBusyAndOwned,
   deleteEvents,
   insertEvents,
   type NewEvent,
@@ -19,15 +18,17 @@ import {
 export const dynamic = "force-dynamic";
 
 // POST /api/sync — rebuild the calendar rendering from the task list.
-// Order (chosen for correctness): delete our old events FIRST, then read
-// free/busy (so our own blocks never count as busy — freebusy can't filter by
-// extended property), then schedule + insert + persist.
+//
+// Gap-safe order: read busy + our existing events, schedule, then CREATE the new
+// events FIRST and only DELETE the old ones once creation succeeds. If anything
+// fails before/at creation, the previous schedule is left untouched (no holes).
+// Busy excludes our own events by marker, so leftover duplicates from a prior
+// failed sync never count as busy.
 export async function POST() {
   try {
     const user = await requireUser();
     const supabase = createClient();
 
-    // 1) settings (incl. refresh token) + tasks
     const { data: settings } = await supabase
       .from("user_settings")
       .select("*")
@@ -59,23 +60,11 @@ export async function POST() {
     const timeMin = now.toISOString();
     const timeMax = DateTime.fromJSDate(now).plus({ days: horizonDays + 1 }).toISO()!;
 
-    // 2) delete every event we own — from stored ids + a marker sweep (self-heals
-    // orphans and manual deletions), then clear our block rows.
-    const { data: oldBlocks } = await supabase
-      .from("scheduled_blocks")
-      .select("gcal_event_id")
-      .eq("user_id", user.id);
-    const storedIds = (oldBlocks ?? []).map((b) => b.gcal_event_id as string);
-    const sweptIds = await listOwnedEventIds(cal, calendarId, timeMin, timeMax);
-    const toDelete = Array.from(new Set([...storedIds, ...sweptIds]));
-    await deleteEvents(cal, calendarId, toDelete);
-    await supabase.from("scheduled_blocks").delete().eq("user_id", user.id);
-
-    // 3) free/busy across all calendars (our events are already gone)
+    // 1) read real busy + our existing events (across all calendars), in one pass
     const calendarIds = await listCalendarIds(cal);
-    const busy = await getBusy(cal, calendarIds, timeMin, timeMax);
+    const { busy, ownedIds } = await getBusyAndOwned(cal, calendarIds, timeMin, timeMax);
 
-    // 4) schedule
+    // 2) schedule
     const schedSettings: SchedulerSettings = {
       timezone: settings.timezone,
       workDays: settings.work_days,
@@ -93,7 +82,7 @@ export async function POST() {
     }));
     const schedule = buildSchedule(schedTasks, busy, schedSettings, now);
 
-    // 5) create Google events (chunk labels), then persist block rows with ids
+    // 3) CREATE the new events first (if this throws, old schedule stays intact)
     const chunkTotals = new Map<string, number>();
     for (const b of schedule) chunkTotals.set(b.taskId, (chunkTotals.get(b.taskId) ?? 0) + 1);
 
@@ -115,6 +104,9 @@ export async function POST() {
 
     const eventIds = await insertEvents(cal, calendarId, newEvents);
 
+    // 4) creation succeeded — swap the DB rows, then delete the OLD events
+    await supabase.from("scheduled_blocks").delete().eq("user_id", user.id);
+    let inserted: unknown[] = [];
     const rows = schedule.map((b, i) => ({
       task_id: b.taskId,
       user_id: user.id,
@@ -123,15 +115,21 @@ export async function POST() {
       end_at: b.end,
       chunk_index: b.chunkIndex,
     }));
-
-    let inserted: unknown[] = [];
     if (rows.length) {
       const { data, error } = await supabase.from("scheduled_blocks").insert(rows).select("*");
       if (error) throw error;
       inserted = data ?? [];
     }
 
-    return NextResponse.json({ blocks: inserted, busy });
+    // delete the previous events (best-effort; leftovers self-heal next sync and
+    // never count as busy since they carry our marker)
+    try {
+      await deleteEvents(cal, calendarId, ownedIds);
+    } catch {
+      /* ignore — cleaned up on the next sync */
+    }
+
+    return NextResponse.json({ blocks: inserted });
   } catch (e) {
     return errorResponse(e);
   }
