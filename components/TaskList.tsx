@@ -3,7 +3,8 @@
 import {
   DndContext,
   closestCenter,
-  PointerSensor,
+  MouseSensor,
+  TouchSensor,
   KeyboardSensor,
   useSensor,
   useSensors,
@@ -44,7 +45,10 @@ export function TaskList<T extends RowTask>({
   onDelete: (id: string) => void;
 }) {
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+    // desktop: small drag threshold so a click still works
+    useSensor(MouseSensor, { activationConstraint: { distance: 5 } }),
+    // touch: press-and-hold briefly to start dragging, so normal swipes still scroll
+    useSensor(TouchSensor, { activationConstraint: { delay: 180, tolerance: 8 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
 
