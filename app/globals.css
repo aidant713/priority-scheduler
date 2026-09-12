@@ -1,0 +1,32 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light; /* keep the app light so native form controls stay readable */
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  @apply bg-neutral-50 text-neutral-900 antialiased;
+}
+
+/* Form controls: always dark text on white, regardless of the OS theme. */
+input,
+select,
+textarea {
+  @apply bg-white text-neutral-900;
+}
+input::placeholder,
+textarea::placeholder {
+  @apply text-neutral-400;
+}
+
+/* dnd-kit: prevent text selection / scroll fighting while dragging */
+.dnd-dragging {
+  @apply cursor-grabbing select-none;
+}
