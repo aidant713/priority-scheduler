@@ -62,16 +62,24 @@ export async function getBusy(
   return out;
 }
 
+export interface OwnedEvent {
+  id: string;
+  taskId: string;
+  chunkIndex: number;
+  startMs: number;
+  endMs: number;
+  summary: string;
+}
 export interface BusyAndOwned {
   busy: Interval[];
-  ownedIds: string[];
+  owned: OwnedEvent[];
 }
 
 /**
  * One pass over all calendars: returns real busy intervals (excluding OUR events,
- * free/transparent, cancelled, and declined) plus the ids of every event we own
- * (so we can delete them). Excluding ours by marker means leftover duplicates from
- * a previously-failed sync never count as busy — so they can't create gaps.
+ * free/transparent, cancelled, and declined) plus full details of every event we
+ * own (so the sync can diff instead of delete-all/recreate-all). Excluding ours by
+ * marker means leftover duplicates from a failed sync never count as busy.
  * (Timed events only; all-day events are treated as free.)
  */
 export async function getBusyAndOwned(
@@ -81,7 +89,7 @@ export async function getBusyAndOwned(
   timeMax: string,
 ): Promise<BusyAndOwned> {
   const busy: Interval[] = [];
-  const ownedIds: string[] = [];
+  const owned: OwnedEvent[] = [];
   for (const calendarId of calendarIds) {
     let pageToken: string | undefined;
     do {
@@ -98,9 +106,21 @@ export async function getBusyAndOwned(
       );
       for (const e of res.data.items ?? []) {
         if (e.status === "cancelled") continue;
-        if (e.extendedProperties?.private?.[OWNED_KEY] === OWNED_VAL) {
-          if (e.id) ownedIds.push(e.id); // ours: exclude from busy, queue for deletion
-          continue;
+        const priv = e.extendedProperties?.private;
+        if (priv?.[OWNED_KEY] === OWNED_VAL) {
+          const start = e.start?.dateTime;
+          const end = e.end?.dateTime;
+          if (e.id && start && end) {
+            owned.push({
+              id: e.id,
+              taskId: priv[TASK_KEY] ?? "",
+              chunkIndex: Number(priv.chunkIndex ?? "0"),
+              startMs: Date.parse(start),
+              endMs: Date.parse(end),
+              summary: e.summary ?? "",
+            });
+          }
+          continue; // ours: never counts as busy
         }
         if (e.transparency === "transparent") continue; // marked "free"
         if ((e.attendees ?? []).some((a) => a.self && a.responseStatus === "declined")) continue;
@@ -111,7 +131,17 @@ export async function getBusyAndOwned(
       pageToken = res.data.nextPageToken ?? undefined;
     } while (pageToken);
   }
-  return { busy, ownedIds };
+  return { busy, owned };
+}
+
+/** Update the title/description of an event we own (for renames). */
+export async function patchEvent(
+  cal: Calendar,
+  calendarId: string,
+  eventId: string,
+  fields: { summary?: string; description?: string },
+): Promise<void> {
+  await withRetry(() => cal.events.patch({ calendarId, eventId, requestBody: fields }));
 }
 
 /** Event ids we previously created in a calendar (found via our marker). */

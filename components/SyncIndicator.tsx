@@ -16,11 +16,19 @@ const DOT: Record<SyncState, string> = {
   error: "bg-red-500",
 };
 
-export function SyncIndicator({ state, onRetry }: { state: SyncState; onRetry: () => void }) {
+export function SyncIndicator({
+  state,
+  onRetry,
+  errorMsg,
+}: {
+  state: SyncState;
+  onRetry: () => void;
+  errorMsg?: string;
+}) {
   return (
     <div className="flex items-center gap-2 text-xs text-neutral-500">
       <span className={`inline-block h-2 w-2 rounded-full ${DOT[state]}`} />
-      <span>{LABEL[state]}</span>
+      <span title={state === "error" ? errorMsg : undefined}>{LABEL[state]}</span>
       {state === "error" && (
         <button onClick={onRetry} className="font-medium text-red-600 underline underline-offset-2">
           retry

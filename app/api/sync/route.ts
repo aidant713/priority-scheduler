@@ -12,18 +12,19 @@ import {
   getBusyAndOwned,
   deleteEvents,
   insertEvents,
+  patchEvent,
   type NewEvent,
 } from "@/lib/google/calendar";
 
 export const dynamic = "force-dynamic";
 
-// POST /api/sync — rebuild the calendar rendering from the task list.
-//
-// Gap-safe order: read busy + our existing events, schedule, then CREATE the new
-// events FIRST and only DELETE the old ones once creation succeeds. If anything
-// fails before/at creation, the previous schedule is left untouched (no holes).
-// Busy excludes our own events by marker, so leftover duplicates from a prior
-// failed sync never count as busy.
+const keyOf = (taskId: string, chunk: number, startMs: number, endMs: number) =>
+  `${taskId}|${chunk}|${startMs}|${endMs}`;
+
+// POST /api/sync — rebuild the calendar from the task list, but DIFF instead of
+// delete-all/recreate-all: keep blocks that didn't move, only create the new ones
+// and delete the stale ones. Cuts API calls dramatically (fewer rate-limit fails),
+// and is gap-safe (creates happen before deletes; ours are excluded from busy).
 export async function POST() {
   try {
     const user = await requireUser();
@@ -60,9 +61,9 @@ export async function POST() {
     const timeMin = now.toISOString();
     const timeMax = DateTime.fromJSDate(now).plus({ days: horizonDays + 1 }).toISO()!;
 
-    // 1) read real busy + our existing events (across all calendars), in one pass
+    // 1) real busy + our existing events (with detail, for diffing)
     const calendarIds = await listCalendarIds(cal);
-    const { busy, ownedIds } = await getBusyAndOwned(cal, calendarIds, timeMin, timeMax);
+    const { busy, owned } = await getBusyAndOwned(cal, calendarIds, timeMin, timeMax);
 
     // 2) schedule
     const schedSettings: SchedulerSettings = {
@@ -82,51 +83,87 @@ export async function POST() {
     }));
     const schedule = buildSchedule(schedTasks, busy, schedSettings, now);
 
-    // 3) CREATE the new events first (if this throws, old schedule stays intact)
     const chunkTotals = new Map<string, number>();
     for (const b of schedule) chunkTotals.set(b.taskId, (chunkTotals.get(b.taskId) ?? 0) + 1);
-
     const prefix: string = settings.block_prefix ?? "⚡ ";
-    const newEvents: NewEvent[] = schedule.map((b) => {
-      const meta = metaById.get(b.taskId);
-      const total = chunkTotals.get(b.taskId) ?? 1;
-      const chunkNote = total > 1 ? `\n\nchunk ${b.chunkIndex + 1} of ${total}` : "";
-      return {
-        taskId: b.taskId,
-        summary: `${prefix}${meta?.title ?? "Task"}`,
-        description: `${meta?.notes ?? ""}${chunkNote}`.trim(),
-        startIso: b.start,
-        endIso: b.end,
-        timeZone: settings.timezone,
-        chunkIndex: b.chunkIndex,
-      };
-    });
+    const summaryOf = (taskId: string) => `${prefix}${metaById.get(taskId)?.title ?? "Task"}`;
+    const descOf = (taskId: string, chunkIndex: number) => {
+      const total = chunkTotals.get(taskId) ?? 1;
+      const note = total > 1 ? `\n\nchunk ${chunkIndex + 1} of ${total}` : "";
+      return `${metaById.get(taskId)?.notes ?? ""}${note}`.trim();
+    };
 
-    const eventIds = await insertEvents(cal, calendarId, newEvents);
+    // 3) DIFF against existing events
+    const existingByKey = new Map(owned.map((e) => [keyOf(e.taskId, e.chunkIndex, e.startMs, e.endMs), e]));
+    const usedIds = new Set<string>();
+    const toCreate: { block: (typeof schedule)[number]; ev: NewEvent }[] = [];
+    // final blocks -> DB rows (eventId filled in below)
+    const finalRows: { taskId: string; start: string; end: string; chunkIndex: number; eventId?: string }[] = [];
 
-    // 4) creation succeeded — swap the DB rows, then delete the OLD events
+    for (const b of schedule) {
+      const k = keyOf(b.taskId, b.chunkIndex, Date.parse(b.start), Date.parse(b.end));
+      const ex = existingByKey.get(k);
+      const row = { taskId: b.taskId, start: b.start, end: b.end, chunkIndex: b.chunkIndex, eventId: undefined as string | undefined };
+      if (ex) {
+        usedIds.add(ex.id);
+        row.eventId = ex.id;
+        // same slot — only fix the title if it changed (rename)
+        const wantSummary = summaryOf(b.taskId);
+        if (ex.summary !== wantSummary) {
+          await patchEvent(cal, calendarId, ex.id, { summary: wantSummary, description: descOf(b.taskId, b.chunkIndex) });
+        }
+      } else {
+        toCreate.push({
+          block: b,
+          ev: {
+            taskId: b.taskId,
+            summary: summaryOf(b.taskId),
+            description: descOf(b.taskId, b.chunkIndex),
+            startIso: b.start,
+            endIso: b.end,
+            timeZone: settings.timezone,
+            chunkIndex: b.chunkIndex,
+          },
+        });
+      }
+      finalRows.push(row);
+    }
+
+    // 4) create the new ones FIRST (gap-safe). If this throws, nothing was deleted.
+    const createdIds = await insertEvents(cal, calendarId, toCreate.map((c) => c.ev));
+    const createdByBlock = new Map(toCreate.map((c, i) => [c.block, createdIds[i]]));
+    for (const r of finalRows) {
+      if (!r.eventId) {
+        const b = schedule.find((s) => s.taskId === r.taskId && s.chunkIndex === r.chunkIndex && s.start === r.start);
+        if (b) r.eventId = createdByBlock.get(b);
+      }
+    }
+
+    // 5) persist the final set
     await supabase.from("scheduled_blocks").delete().eq("user_id", user.id);
     let inserted: unknown[] = [];
-    const rows = schedule.map((b, i) => ({
-      task_id: b.taskId,
-      user_id: user.id,
-      gcal_event_id: eventIds[i],
-      start_at: b.start,
-      end_at: b.end,
-      chunk_index: b.chunkIndex,
-    }));
+    const rows = finalRows
+      .filter((r) => r.eventId)
+      .map((r) => ({
+        task_id: r.taskId,
+        user_id: user.id,
+        gcal_event_id: r.eventId!,
+        start_at: r.start,
+        end_at: r.end,
+        chunk_index: r.chunkIndex,
+      }));
     if (rows.length) {
       const { data, error } = await supabase.from("scheduled_blocks").insert(rows).select("*");
       if (error) throw error;
       inserted = data ?? [];
     }
 
-    // delete the previous events (best-effort; leftovers self-heal next sync and
-    // never count as busy since they carry our marker)
+    // 6) delete stale events (owned but not reused) — best-effort
+    const toDelete = owned.filter((e) => !usedIds.has(e.id)).map((e) => e.id);
     try {
-      await deleteEvents(cal, calendarId, ownedIds);
+      await deleteEvents(cal, calendarId, toDelete);
     } catch {
-      /* ignore — cleaned up on the next sync */
+      /* leftovers self-heal next sync and never count as busy */
     }
 
     return NextResponse.json({ blocks: inserted });

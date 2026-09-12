@@ -41,6 +41,7 @@ export default function TaskBoard({
   const [tasks, setTasks] = useState<Task[]>(initialTasks);
   const [blocks, setBlocks] = useState<BlockRow[]>(initialBlocks);
   const [sync, setSync] = useState<SyncState>("idle");
+  const [syncErr, setSyncErr] = useState<string>("");
   const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
   const syncing = useRef(false);
   const pendingSync = useRef(false);
@@ -80,11 +81,22 @@ export default function TaskBoard({
     setSync("syncing");
     try {
       const res = await fetch("/api/sync", { method: "POST" });
-      if (!res.ok) throw new Error(await res.text());
+      if (!res.ok) {
+        const body = await res.text();
+        let msg = body;
+        try {
+          msg = JSON.parse(body).error ?? body;
+        } catch {
+          /* not JSON */
+        }
+        throw new Error(msg || `HTTP ${res.status}`);
+      }
       const data = await res.json();
       setBlocks(data.blocks ?? []);
+      setSyncErr("");
       setSync("synced");
-    } catch {
+    } catch (e) {
+      setSyncErr(e instanceof Error ? e.message : "sync failed");
       setSync("error");
     } finally {
       syncing.current = false;
@@ -315,7 +327,7 @@ export default function TaskBoard({
             <p className="truncate text-xs text-neutral-400">{userEmail}</p>
           </div>
           <div className="flex items-center gap-2">
-            <SyncIndicator state={sync} onRetry={runSync} />
+            <SyncIndicator state={sync} onRetry={runSync} errorMsg={syncErr} />
             {googleConnected && (
               <button
                 onClick={runSync}
