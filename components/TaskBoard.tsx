@@ -314,19 +314,22 @@ export default function TaskBoard({
             <h1 className="text-lg font-semibold">Priority Scheduler</h1>
             <p className="truncate text-xs text-neutral-400">{userEmail}</p>
           </div>
-          <SyncIndicator state={sync} onRetry={runSync} />
+          <div className="flex items-center gap-2">
+            <SyncIndicator state={sync} onRetry={runSync} />
+            {googleConnected && (
+              <button
+                onClick={runSync}
+                disabled={sync === "syncing"}
+                aria-label="Sync now"
+                title="Sync now — rebuild the calendar"
+                className="rounded-md border border-neutral-200 bg-white px-2 py-1 text-sm leading-none text-neutral-500 hover:bg-neutral-50 disabled:opacity-40"
+              >
+                <span className={`inline-block ${sync === "syncing" ? "animate-spin" : ""}`}>⟳</span>
+              </button>
+            )}
+          </div>
         </div>
         <div className="mt-3 flex flex-wrap gap-2">
-          {googleConnected && (
-            <button
-              onClick={runSync}
-              disabled={sync === "syncing"}
-              title="Rebuild the calendar now (e.g. after you changed a Google Calendar event)"
-              className="whitespace-nowrap rounded-lg border border-neutral-200 bg-white px-3 py-1.5 text-sm text-neutral-700 enabled:hover:bg-neutral-50 disabled:opacity-40"
-            >
-              ⟳ Sync now
-            </button>
-          )}
           <button
             onClick={doUndo}
             disabled={!undoLabel}
