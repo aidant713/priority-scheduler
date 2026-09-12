@@ -42,12 +42,18 @@ export function TaskRow({
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState(task.title);
   const [showDue, setShowDue] = useState(false);
+  const [dueDraft, setDueDraft] = useState("");
 
   const style = { transform: CSS.Transform.toString(transform), transition };
 
   const dd = task.deadline ? DateTime.fromISO(task.deadline, { zone: "utc" }).setZone(tz) : null;
   const dueValue = dd ? dd.toFormat("yyyy-LL-dd") : "";
   const dueDisplay = dd ? dd.toFormat("d LLL") : null;
+
+  function toggleDue() {
+    if (!showDue) setDueDraft(dueValue); // seed the picker with the current value
+    setShowDue((v) => !v);
+  }
 
   function commitCustom() {
     const n = Math.round(Number(custom));
@@ -77,7 +83,7 @@ export function TaskRow({
         {...attributes}
         {...listeners}
         aria-label="Drag to reorder (or focus and use arrow keys)"
-        className="mt-0.5 cursor-grab touch-none select-none px-1 text-neutral-400 hover:text-neutral-600"
+        className="-my-3 flex cursor-grab touch-none select-none items-center self-stretch rounded px-2 text-2xl leading-none text-neutral-400 hover:bg-neutral-100 hover:text-neutral-600 active:cursor-grabbing"
       >
         ⠿
       </button>
@@ -128,7 +134,7 @@ export function TaskRow({
               }`}
             >
               <button
-                onClick={() => setShowDue((v) => !v)}
+                onClick={toggleDue}
                 title={overdueRisk ? "Scheduled to finish after its due date" : "Change due date"}
               >
                 {overdueRisk ? "⚠ " : ""}due {dueDisplay}
@@ -143,7 +149,7 @@ export function TaskRow({
             </span>
           ) : (
             <button
-              onClick={() => setShowDue((v) => !v)}
+              onClick={toggleDue}
               className="whitespace-nowrap text-neutral-400 hover:text-neutral-600"
             >
               + due date
@@ -152,16 +158,28 @@ export function TaskRow({
         </div>
 
         {showDue && (
-          <div className="mt-2">
+          <div className="mt-2 flex flex-wrap items-center gap-2">
             <input
               type="date"
-              value={dueValue}
-              onChange={(e) => {
-                onDeadline(e.target.value || null);
+              value={dueDraft}
+              onChange={(e) => setDueDraft(e.target.value)}
+              className="rounded border border-neutral-200 px-2 py-1 text-xs"
+            />
+            <button
+              onClick={() => {
+                onDeadline(dueDraft || null);
                 setShowDue(false);
               }}
-              className="rounded border border-neutral-200 px-2 py-0.5 text-xs"
-            />
+              className="rounded bg-neutral-900 px-3 py-1 text-xs font-medium text-white"
+            >
+              Set
+            </button>
+            <button
+              onClick={() => setShowDue(false)}
+              className="px-2 py-1 text-xs text-neutral-400 hover:text-neutral-600"
+            >
+              Cancel
+            </button>
           </div>
         )}
 
